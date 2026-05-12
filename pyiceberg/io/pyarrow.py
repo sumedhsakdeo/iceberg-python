@@ -1614,6 +1614,7 @@ def _task_to_record_batches(
     partition_spec: PartitionSpec | None = None,
     format_version: TableVersion = TableProperties.DEFAULT_FORMAT_VERSION,
     downcast_ns_timestamp_to_us: bool | None = None,
+    batch_size: int | None = None,
 ) -> Iterator[pa.RecordBatch]:
     arrow_format = _get_file_format(task.file.file_format, pre_buffer=True, buffer_size=(ONE_MEGABYTE * 8))
     with io.new_input(task.file.file_path).open() as fin:
@@ -1645,14 +1646,18 @@ def _task_to_record_batches(
 
         file_project_schema = prune_columns(file_schema, projected_field_ids, select_full_types=False)
 
-        fragment_scanner = ds.Scanner.from_fragment(
-            fragment=fragment,
-            schema=physical_schema,
+        scanner_kwargs: dict[str, Any] = {
+            "fragment": fragment,
+            "schema": physical_schema,
             # This will push down the query to Arrow.
             # But in case there are positional deletes, we have to apply them first
-            filter=pyarrow_filter if not positional_deletes else None,
-            columns=[col.name for col in file_project_schema.columns],
-        )
+            "filter": pyarrow_filter if not positional_deletes else None,
+            "columns": [col.name for col in file_project_schema.columns],
+        }
+        if batch_size is not None:
+            scanner_kwargs["batch_size"] = batch_size
+
+        fragment_scanner = ds.Scanner.from_fragment(**scanner_kwargs)
 
         next_index = 0
         batches = fragment_scanner.to_batches()
@@ -1789,7 +1794,7 @@ class ArrowScan:
 
         return result
 
-    def to_record_batches(self, tasks: Iterable[FileScanTask]) -> Iterator[pa.RecordBatch]:
+    def to_record_batches(self, tasks: Iterable[FileScanTask], batch_size: int | None = None) -> Iterator[pa.RecordBatch]:
         """Scan the Iceberg table and return an Iterator[pa.RecordBatch].
 
         Returns an Iterator of pa.RecordBatch with data from the Iceberg table
@@ -1816,7 +1821,7 @@ class ArrowScan:
             # Materialize the iterator here to ensure execution happens within the executor.
             # Otherwise, the iterator would be lazily consumed later (in the main thread),
             # defeating the purpose of using executor.map.
-            return list(self._record_batches_from_scan_tasks_and_deletes([task], deletes_per_file))
+            return list(self._record_batches_from_scan_tasks_and_deletes([task], deletes_per_file, batch_size))
 
         limit_reached = False
         for batches in executor.map(batches_for_task, tasks):
@@ -1836,7 +1841,7 @@ class ArrowScan:
                 break
 
     def _record_batches_from_scan_tasks_and_deletes(
-        self, tasks: Iterable[FileScanTask], deletes_per_file: dict[str, list[ChunkedArray]]
+        self, tasks: Iterable[FileScanTask], deletes_per_file: dict[str, list[ChunkedArray]], batch_size: int | None = None
     ) -> Iterator[pa.RecordBatch]:
         total_row_count = 0
         for task in tasks:
@@ -1855,6 +1860,7 @@ class ArrowScan:
                 self._table_metadata.specs().get(task.file.spec_id),
                 self._table_metadata.format_version,
                 self._downcast_ns_timestamp_to_us,
+                batch_size,
             )
             for batch in batches:
                 if self._limit is not None:

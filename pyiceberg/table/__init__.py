@@ -1961,13 +1961,11 @@ class DataScan(TableScan):
         # The lambda created here is run in multiple threads.
         # So we avoid creating _EvaluatorExpression methods bound to a single
         # shared instance across multiple threads.
-        return lambda datafile: (
-            residual_evaluator_of(
-                spec=spec,
-                expr=self.row_filter,
-                case_sensitive=self.case_sensitive,
-                schema=self.table_metadata.schema(),
-            )
+        return lambda datafile: residual_evaluator_of(
+            spec=spec,
+            expr=self.row_filter,
+            case_sensitive=self.case_sensitive,
+            schema=self.table_metadata.schema(),
         )
 
     @staticmethod
@@ -2116,12 +2114,15 @@ class DataScan(TableScan):
             self.table_metadata, self.io, self.projection(), self.row_filter, self.case_sensitive, self.limit
         ).to_table(self.plan_files())
 
-    def to_arrow_batch_reader(self) -> pa.RecordBatchReader:
+    def to_arrow_batch_reader(self, batch_size: int | None = None) -> pa.RecordBatchReader:
         """Return an Arrow RecordBatchReader from this DataScan.
 
         For large results, using a RecordBatchReader requires less memory than
         loading an Arrow Table for the same DataScan, because a RecordBatch
         is read one at a time.
+
+        Args:
+            batch_size: The number of rows per batch. If None, PyArrow's default is used.
 
         Returns:
             pa.RecordBatchReader: Arrow RecordBatchReader from the Iceberg table's DataScan
@@ -2134,7 +2135,7 @@ class DataScan(TableScan):
         target_schema = schema_to_pyarrow(self.projection())
         batches = ArrowScan(
             self.table_metadata, self.io, self.projection(), self.row_filter, self.case_sensitive, self.limit
-        ).to_record_batches(self.plan_files())
+        ).to_record_batches(self.plan_files(), batch_size=batch_size)
 
         return pa.RecordBatchReader.from_batches(
             target_schema,
